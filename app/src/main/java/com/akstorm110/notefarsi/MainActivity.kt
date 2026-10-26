@@ -49,7 +49,7 @@ class MainActivity : Activity() {
         search = EditText(this).apply {
             hint = "جستجو در یادداشت‌ها"
             textSize = 15f
-            singleLine = true
+            setSingleLine(true)
             setPadding(dp(12), 0, dp(12), 0)
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             setBackgroundColor(android.graphics.Color.WHITE)
