@@ -1,0 +1,87 @@
+name: Clash Royale Maintenance Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check current signals
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os, re, json, urllib.request, urllib.error
+          from datetime import datetime, timezone
+
+          checks = []
+          targets = [
+              ("RoyaleAPI live site", "https://royaleapi.com/"),
+              ("Supercell official site", "https://supercell.com/"),
+          ]
+          for name, url in targets:
+              req = urllib.request.Request(url, headers={"User-Agent": "ClashRoyaleMaintenanceMonitor/1.0"})
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as response:
+                      body = response.read(1_500_000).decode("utf-8", "ignore")
+                      text = re.sub(r"<[^>]+>", " ", body)
+                      text = re.sub(r"\s+", " ", text).lower()
+                      maintenance = "maintenance" in text and ("clash royale" in text or "maintenance break" in text)
+                      checks.append({"name": name, "url": url, "http": response.status, "maintenance_text": maintenance})
+              except Exception as e:
+                  checks.append({"name": name, "url": url, "error": str(e)})
+
+          # RoyaleAPI's public status page reports its own services, not Supercell's game servers.
+          status_url = "https://royaleapi.statuspage.io/api/v2/summary.json"
+          try:
+              req = urllib.request.Request(status_url, headers={"User-Agent": "ClashRoyaleMaintenanceMonitor/1.0"})
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  data = json.loads(response.read().decode("utf-8"))
+                  checks.append({
+                      "name": "RoyaleAPI status page (not official Supercell status)",
+                      "url": status_url,
+                      "status": data.get("status", {}).get("description", "Unknown"),
+                      "unresolved_incidents": len(data.get("incidents", []))
+                  })
+          except Exception as e:
+              checks.append({"name": "RoyaleAPI status page", "error": str(e)})
+
+          now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+          lines = [f"## Clash Royale maintenance check — {now}", "",
+                   "This is an automated signal check, not a guaranteed readout of in-game Battle availability.", ""]
+          for item in checks:
+              lines.append(f"- **{item['name']}**: " + json.dumps(item, ensure_ascii=False))
+          lines += ["", "Official support explains what a maintenance break means, but does not publish a live end-time countdown:",
+                    "https://support.clashroyale.com/hc/en-us/articles/49484903199003-Maintenance-Breaks"]
+          summary = "\n".join(lines)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write(summary + "\n")
+
+          # Optional Telegram delivery. Configure both repository Actions secrets to enable it.
+          token = os.getenv("TELEGRAM_BOT_TOKEN")
+          chat_id = os.getenv("TELEGRAM_CHAT_ID")
+          if token and chat_id:
+              msg = "Clash Royale maintenance check (" + now + ")\n" + "\n".join(
+                  f"{x['name']}: " + (x.get("status") or ("HTTP " + str(x.get("http")) if x.get("http") else x.get("error", "unknown")))
+                  for x in checks
+              )
+              payload = json.dumps({"chat_id": chat_id, "text": msg[:3900]}).encode()
+              req = urllib.request.Request(
+                  f"https://api.telegram.org/bot{token}/sendMessage",
+                  data=payload, headers={"Content-Type": "application/json"}, method="POST"
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=20).read()
+                  print("Telegram report sent.")
+              except Exception as e:
+                  print("Telegram delivery failed:", e)
+          else:
+              print("Telegram secrets are not configured; see Actions summary for this check.")
+          PY
